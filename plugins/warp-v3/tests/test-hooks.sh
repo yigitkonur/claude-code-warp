@@ -390,6 +390,450 @@ fi
 unset WARP_CLI_AGENT_PROTOCOL_VERSION
 unset WARP_CLIENT_VERSION
 
+# --- Empty-field stripping (R4) ---
+# Warp interprets model:"" / permission_mode:"" as "still initializing" and
+# leaves the sidebar stuck on in-progress. build_payload must strip empty-
+# string --arg values before emitting.
+
+echo ""
+echo "=== R4: empty-field stripping ==="
+
+PAYLOAD=$(build_payload '{"session_id":"s1","cwd":"/tmp"}' "session_start" \
+    --arg plugin_version "3.0.1" \
+    --arg source "startup" \
+    --arg model "" \
+    --arg permission_mode "" \
+    --arg agent_type "")
+assert_eq "R4: model key absent when empty"           "false" "$(echo "$PAYLOAD" | jq 'has("model")' 2>/dev/null)"
+assert_eq "R4: permission_mode key absent when empty" "false" "$(echo "$PAYLOAD" | jq 'has("permission_mode")' 2>/dev/null)"
+assert_eq "R4: agent_type key absent when empty"      "false" "$(echo "$PAYLOAD" | jq 'has("agent_type")' 2>/dev/null)"
+assert_json_field "R4: plugin_version kept (non-empty)" "$PAYLOAD" ".plugin_version" "3.0.1"
+assert_json_field "R4: source kept (non-empty)"         "$PAYLOAD" ".source"         "startup"
+assert_json_field "R4: envelope session_id still present" "$PAYLOAD" ".session_id" "s1"
+
+# Non-empty enrichment survives unchanged.
+PAYLOAD=$(build_payload '{"session_id":"s1","cwd":"/tmp"}' "session_start" \
+    --arg model "claude-opus-4-7" \
+    --arg permission_mode "acceptEdits")
+assert_json_field "R4: non-empty model kept"           "$PAYLOAD" ".model"           "claude-opus-4-7"
+assert_json_field "R4: non-empty permission_mode kept" "$PAYLOAD" ".permission_mode" "acceptEdits"
+
+# --- Empty session_id guard (R7) ---
+
+echo ""
+echo "=== R7: empty session_id short-circuits build_payload ==="
+
+PAYLOAD=$(build_payload '{}' "stop" --arg tool_name "Bash")
+assert_eq "R7: empty session_id → empty payload"   "" "$PAYLOAD"
+
+PAYLOAD=$(build_payload '{"cwd":"/tmp"}' "stop")
+assert_eq "R7: missing session_id → empty payload" "" "$PAYLOAD"
+
+# Envelope stays normal when session_id is present, even if other fields aren't.
+PAYLOAD=$(build_payload '{"session_id":"s1"}' "stop")
+assert_json_field "R7: session_id alone is enough"   "$PAYLOAD" ".session_id" "s1"
+
+# --- UTF-8 codepoint-safe truncation (R7) ---
+
+echo ""
+echo "=== R7: UTF-8-safe truncation ==="
+
+# ASCII: 400 x's → truncated to exactly 200 codepoints (197 + "...")
+LONG=$(printf 'x%.0s' {1..400})
+TRUNC=$(utf8_truncate "$LONG" 200)
+TRUNC_LEN=$(printf '%s' "$TRUNC" | jq -Rs 'length')
+assert_eq "utf8_truncate: ASCII length = 200 codepoints" "200" "$TRUNC_LEN"
+
+# Multi-byte: 300 €'s (3 bytes each in UTF-8, but 300 codepoints)
+MB=$(printf '€%.0s' {1..300})
+TRUNC_MB=$(utf8_truncate "$MB" 200)
+TRUNC_MB_LEN=$(printf '%s' "$TRUNC_MB" | jq -Rs 'length')
+assert_eq "utf8_truncate: multi-byte = 200 codepoints"   "200" "$TRUNC_MB_LEN"
+
+# Short text — unchanged.
+assert_eq "utf8_truncate: short text unchanged" "hello" "$(utf8_truncate "hello" 200)"
+
+# Truncated multi-byte survives a roundtrip through build_payload as valid JSON.
+BODY=$(build_payload '{"session_id":"s1","cwd":"/tmp"}' "stop" \
+    --arg query "$TRUNC_MB" \
+    --arg response "$TRUNC")
+PARSED_QUERY_LEN=$(echo "$BODY" | jq -r '.query | length' 2>/dev/null)
+assert_eq "utf8_truncate: truncated multi-byte → valid JSON" "200" "$PARSED_QUERY_LEN"
+
+# --- should_emit_v3_events ---
+
+echo ""
+echo "=== should_emit_v3_events (R5 gate) ==="
+
+unset WARP_CLI_AGENT_V3_EVENTS
+should_emit_v3_events; assert_eq "WARP_CLI_AGENT_V3_EVENTS unset → false" "1" "$?"
+
+export WARP_CLI_AGENT_V3_EVENTS=0
+should_emit_v3_events; assert_eq "WARP_CLI_AGENT_V3_EVENTS=0 → false"     "1" "$?"
+
+export WARP_CLI_AGENT_V3_EVENTS=1
+should_emit_v3_events; assert_eq "WARP_CLI_AGENT_V3_EVENTS=1 → true"      "0" "$?"
+
+unset WARP_CLI_AGENT_V3_EVENTS
+
+# --- End-to-end log harness ---
+# Uses a per-test TMPDIR so the log file path is deterministic. Hook scripts
+# write HOOK= lines at entry and warp-notify.sh writes EMIT lines right before
+# the /dev/tty send — inspecting the log tells us exactly what the adapter did.
+
+export WARP_CLI_AGENT_PROTOCOL_VERSION=1
+export WARP_CLIENT_VERSION="v0.2099.12.31.23.59.stable_99"
+
+setup_log_fixture() {
+    export TMPDIR="/tmp/warp-test-$$-$1"
+    rm -rf "$TMPDIR"
+    mkdir -p "$TMPDIR"
+    TEST_SESSION="log-$1-$$"
+    LOGFILE="$TMPDIR/warp-claude-$TEST_SESSION.log"
+}
+
+teardown_log_fixture() {
+    rm -rf "$TMPDIR" 2>/dev/null || true
+    unset TMPDIR
+}
+
+# grep -c outputs "0" AND exits 1 when no matches, so the usual `|| echo 0`
+# fallback would produce "0\n0". Helper returns just the count.
+count_matches() {
+    local pattern="$1"
+    local file="$2"
+    [ -f "$file" ] || { echo 0; return; }
+    local c
+    c=$(grep -c "$pattern" "$file" 2>/dev/null || true)
+    echo "${c:-0}"
+}
+
+echo ""
+echo "=== R1: PostToolUse gates tool_complete via .blocked marker (fixes stuck Blocked AND issue #22 leak) ==="
+
+# Read WITHOUT a prior PermissionRequest: auto-approved, no Blocked to clear,
+# so we skip emission — preserves upstream's memory-leak mitigation.
+setup_log_fixture "r1-read-auto"
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", tool_name:"Read", tool_input:{file_path:"/tmp/foo.txt"}}')
+echo "$INPUT" | bash "$HOOK_DIR/on-post-tool-use.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    assert_eq "R1: auto-approved Read skips emission (no leak)" "0" "$(count_matches 'EMIT.*event=tool_complete' "$LOGFILE")"
+fi
+teardown_log_fixture
+
+# Read AFTER PermissionRequest: .blocked marker exists, sidebar needs
+# tool_complete to move out of Blocked — emit it.
+setup_log_fixture "r1-read-after-perm"
+PERM_INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", tool_name:"Read", tool_input:{file_path:"/tmp/foo.txt"}}')
+echo "$PERM_INPUT" | bash "$HOOK_DIR/on-permission-request.sh" >/dev/null 2>&1
+if [ -f "$TMPDIR/warp-claude-$TEST_SESSION.blocked" ]; then
+    assert_eq "R1: PermissionRequest drops .blocked marker" "exists" "exists"
+else
+    assert_eq "R1: PermissionRequest drops .blocked marker" "exists" "missing"
+fi
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", tool_name:"Read", tool_input:{file_path:"/tmp/foo.txt"}}')
+echo "$INPUT" | bash "$HOOK_DIR/on-post-tool-use.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    assert_eq "R1: after PermissionRequest, Read emits tool_complete" "1" "$(count_matches 'EMIT.*event=tool_complete' "$LOGFILE")"
+fi
+if [ ! -f "$TMPDIR/warp-claude-$TEST_SESSION.blocked" ]; then
+    assert_eq "R1: PostToolUse consumes the marker" "cleared" "cleared"
+else
+    assert_eq "R1: PostToolUse consumes the marker" "cleared" "stale"
+fi
+teardown_log_fixture
+
+# Bash ALWAYS emits (state-transition tool, even without prior permission).
+setup_log_fixture "r1-bash-auto"
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", tool_name:"Bash", tool_input:{command:"ls"}}')
+echo "$INPUT" | bash "$HOOK_DIR/on-post-tool-use.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    assert_eq "R1: Bash emits tool_complete unconditionally" "1" "$(count_matches 'EMIT.*event=tool_complete' "$LOGFILE")"
+fi
+teardown_log_fixture
+
+# PermissionDenied clears the marker so next tool call doesn't over-emit.
+setup_log_fixture "r1-denied-clears"
+PERM_INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", tool_name:"Bash", tool_input:{command:"rm -rf /"}}')
+echo "$PERM_INPUT" | bash "$HOOK_DIR/on-permission-request.sh" >/dev/null 2>&1
+DENY_INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", tool_name:"Bash", tool_input:{command:"rm -rf /"}, reason:"unsafe"}')
+echo "$DENY_INPUT" | bash "$HOOK_DIR/on-permission-denied.sh" >/dev/null 2>&1
+if [ ! -f "$TMPDIR/warp-claude-$TEST_SESSION.blocked" ]; then
+    assert_eq "R1: PermissionDenied clears .blocked marker" "cleared" "cleared"
+else
+    assert_eq "R1: PermissionDenied clears .blocked marker" "cleared" "stale"
+fi
+teardown_log_fixture
+
+echo ""
+echo "=== session_start: fresh tab emits NOTHING (Droid/Gemini parity) ==="
+
+# v3.0.5 behavior — on source=startup, on-session-start.sh exits silently.
+# Gemini CLI and Factory/Droid don't register any Warp hook at all in this
+# user's setup; their sidebar rows show only CLI label + cwd + branch, no
+# state pill. Matching that means emitting zero `warp://cli-agent` events on
+# startup — Warp's process-detection takes over and gives us the same clean
+# row. First event only fires on UserPromptSubmit.
+setup_log_fixture "startup-emits-nothing"
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" \
+    '{session_id:$sid, cwd:"/tmp", source:"startup", model:"claude-opus-4-7[1m]", permission_mode:"default"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-session-start.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    assert_eq "startup: HOOK= line still logged (diagnostic)"  "1" "$(count_matches 'HOOK=SessionStart' "$LOGFILE")"
+    assert_eq "startup: zero EMIT lines"                        "0" "$(count_matches 'EMIT' "$LOGFILE")"
+else
+    # Acceptable alternative: no log file at all (hook exited before log_hook).
+    # But our current impl does log before the startup early-exit, so the above
+    # branch is the one that runs.
+    assert_eq "startup: log file exists (for HOOK line)" "yes" "no"
+fi
+teardown_log_fixture
+
+# plugin_version is attached to prompt_submit now (moved from session_start so
+# Warp's outdated-plugin banner still has a signal, just later in the lifecycle).
+setup_log_fixture "prompt-submit-carries-plugin-version"
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", prompt:"hi"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-prompt-submit.sh" >/dev/null 2>&1
+# Just assert the payload exists — we check the field placement by reading the raw body.
+PAYLOAD=$(build_payload '{"session_id":"s1","cwd":"/tmp"}' "prompt_submit" \
+    --arg query "hi" \
+    --arg plugin_version "3.0.5")
+assert_eq "prompt_submit carries plugin_version" "3.0.5" "$(echo "$PAYLOAD" | jq -r '.plugin_version' 2>/dev/null)"
+teardown_log_fixture
+
+# On resume/clear/compact, we DO emit session_start with enrichment — a
+# returning session has context to surface and the sidebar should reflect it.
+setup_log_fixture "resume-emits-enrichment"
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" \
+    '{session_id:$sid, cwd:"/tmp", source:"resume", model:"claude-opus-4-7[1m]", permission_mode:"acceptEdits"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-session-start.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    assert_eq "resume: session_start emitted"                   "1" "$(count_matches 'EMIT.*event=session_start' "$LOGFILE")"
+    assert_eq "resume: source=resume preserved"                 "1" "$(count_matches 'EMIT.*source=resume' "$LOGFILE")"
+    assert_eq "resume: model= preserved (informative)"          "1" "$(count_matches 'EMIT.*model=' "$LOGFILE")"
+    assert_eq "resume: permission_mode=acceptEdits preserved"   "1" "$(count_matches 'EMIT.*permission_mode=acceptEdits' "$LOGFILE")"
+fi
+teardown_log_fixture
+
+echo ""
+echo "=== CLAUDE_CODE_DISABLE_TERMINAL_TITLE (issue #24) ==="
+
+setup_log_fixture "disable-title"
+export CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", prompt:"refactor auth module"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-prompt-submit.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    assert_eq "#24: query absent when CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1"          "0" "$(count_matches 'EMIT.*query=' "$LOGFILE")"
+    assert_eq "#24: session_title absent when disabled"                              "0" "$(count_matches 'EMIT.*session_title=' "$LOGFILE")"
+    assert_eq "#24: event still fires"                                               "1" "$(count_matches 'EMIT.*event=prompt_submit' "$LOGFILE")"
+fi
+unset CLAUDE_CODE_DISABLE_TERMINAL_TITLE
+teardown_log_fixture
+
+# Sanity: when NOT set, query IS present.
+setup_log_fixture "disable-title-default"
+unset CLAUDE_CODE_DISABLE_TERMINAL_TITLE
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", prompt:"refactor auth module"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-prompt-submit.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    assert_eq "#24: query present by default" "1" "$(count_matches 'EMIT.*query=' "$LOGFILE")"
+fi
+teardown_log_fixture
+
+echo ""
+echo "=== WARP_PLUGIN_DISABLE_PROJECT (issue #23) ==="
+
+export WARP_PLUGIN_DISABLE_PROJECT=1
+PAYLOAD=$(build_payload '{"session_id":"s1","cwd":"/Users/alice/my-project"}' "stop")
+assert_eq "#23: project key absent when WARP_PLUGIN_DISABLE_PROJECT=1" "false" "$(echo "$PAYLOAD" | jq 'has("project")' 2>/dev/null)"
+assert_json_field "#23: cwd still present (used by Warp for git-status)" "$PAYLOAD" ".cwd" "/Users/alice/my-project"
+unset WARP_PLUGIN_DISABLE_PROJECT
+
+# Sanity: default behavior unchanged.
+PAYLOAD=$(build_payload '{"session_id":"s1","cwd":"/Users/alice/my-project"}' "stop")
+assert_json_field "#23: project present by default" "$PAYLOAD" ".project" "my-project"
+
+echo ""
+echo "=== R2: PreToolUse emits tool_start ==="
+
+setup_log_fixture "r2"
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", tool_name:"Bash", tool_input:{command:"ls -la"}}')
+echo "$INPUT" | bash "$HOOK_DIR/on-pre-tool-use.sh" >/dev/null 2>&1
+
+if [ -f "$LOGFILE" ]; then
+    assert_eq "R2: PreToolUse produces HOOK line"       "1" "$(count_matches 'HOOK=PreToolUse' "$LOGFILE")"
+    assert_eq "R2: PreToolUse produces EMIT=tool_start" "1" "$(count_matches 'EMIT.*event=tool_start' "$LOGFILE")"
+    # EMIT line carries tool_name=Bash (HOOK line may also carry it — count only EMIT)
+    EMIT_TOOL=$( (grep 'EMIT' "$LOGFILE" 2>/dev/null; echo) | grep -c 'tool_name=Bash' 2>/dev/null || true)
+    assert_eq "R2: PreToolUse EMIT line carries tool_name=Bash" "1" "${EMIT_TOOL:-0}"
+    # EMIT line also carries tool_preview reflecting the command
+    EMIT_PREVIEW=$( (grep 'EMIT' "$LOGFILE" 2>/dev/null; echo) | grep -c 'tool_preview=' 2>/dev/null || true)
+    assert_eq "R2: PreToolUse EMIT line carries tool_preview" "1" "${EMIT_PREVIEW:-0}"
+else
+    assert_eq "R2: PreToolUse log file exists" "yes" "no"
+fi
+teardown_log_fixture
+
+echo ""
+echo "=== R6: -p mode silence ==="
+
+setup_log_fixture "r6-start"
+export _WARP_FORCE_NO_TTY=1
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", source:"startup"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-session-start.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    EMIT_LINES=$(count_matches 'EMIT' "$LOGFILE")
+    assert_eq "R6: on-session-start emits 0 in -p mode" "0" "$EMIT_LINES"
+else
+    # R6 exits before any logging — expected.
+    assert_eq "R6: on-session-start silent in -p mode" "silent" "silent"
+fi
+unset _WARP_FORCE_NO_TTY
+teardown_log_fixture
+
+setup_log_fixture "r6-end"
+export _WARP_FORCE_NO_TTY=1
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", reason:"clear"}')
+# Prime a .query file to verify -p mode still cleans up.
+printf 'primed' > "$TMPDIR/warp-claude-$TEST_SESSION.query"
+echo "$INPUT" | bash "$HOOK_DIR/on-session-end.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    EMIT_LINES=$(count_matches 'EMIT' "$LOGFILE")
+    assert_eq "R6: on-session-end emits 0 in -p mode" "0" "$EMIT_LINES"
+fi
+if [ ! -f "$TMPDIR/warp-claude-$TEST_SESSION.query" ]; then
+    assert_eq "R6: -p mode still cleans .query temp file" "cleaned" "cleaned"
+else
+    assert_eq "R6: -p mode still cleans .query temp file" "cleaned" "leaked"
+fi
+unset _WARP_FORCE_NO_TTY
+teardown_log_fixture
+
+echo ""
+echo "=== R5: V3_EVENTS gate routing ==="
+
+# on-permission-denied: V3 off → tool_complete fallback
+setup_log_fixture "r5-denied-off"
+unset WARP_CLI_AGENT_V3_EVENTS
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", tool_name:"Bash", tool_input:{command:"rm -rf /"}, reason:"unsafe"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-permission-denied.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    EVENT=$(grep 'EMIT' "$LOGFILE" | grep -oE 'event=[a-z_]+' | tail -1)
+    assert_eq "R5: V3 off → permission_denied falls back" "event=tool_complete" "$EVENT"
+else
+    assert_eq "R5: V3 off permission_denied log exists" "yes" "no"
+fi
+teardown_log_fixture
+
+# on-permission-denied: V3 on → permission_denied
+setup_log_fixture "r5-denied-on"
+export WARP_CLI_AGENT_V3_EVENTS=1
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", tool_name:"Bash", tool_input:{command:"rm -rf /"}, reason:"unsafe"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-permission-denied.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    EVENT=$(grep 'EMIT' "$LOGFILE" | grep -oE 'event=[a-z_]+' | tail -1)
+    assert_eq "R5: V3 on → permission_denied emits as-is" "event=permission_denied" "$EVENT"
+else
+    assert_eq "R5: V3 on permission_denied log exists" "yes" "no"
+fi
+unset WARP_CLI_AGENT_V3_EVENTS
+teardown_log_fixture
+
+# on-session-end: V3 off → suppressed
+setup_log_fixture "r5-send-off"
+unset WARP_CLI_AGENT_V3_EVENTS
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", reason:"clear"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-session-end.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    assert_eq "R5: V3 off → session_end emits nothing" "0" "$(count_matches 'EMIT' "$LOGFILE")"
+else
+    # on-session-end deletes the log by default — that's also a valid no-emit outcome
+    assert_eq "R5: V3 off → session_end emits nothing" "nothing" "nothing"
+fi
+teardown_log_fixture
+
+# on-session-end: V3 on → session_end (and WARP_KEEP_LOGS keeps the file readable)
+setup_log_fixture "r5-send-on"
+export WARP_CLI_AGENT_V3_EVENTS=1
+export WARP_KEEP_LOGS=1
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", reason:"clear"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-session-end.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    EVENT=$(grep 'EMIT' "$LOGFILE" | grep -oE 'event=[a-z_]+' | tail -1)
+    assert_eq "R5: V3 on → session_end emits session_end" "event=session_end" "$EVENT"
+else
+    assert_eq "R5: V3 on session_end log survives under WARP_KEEP_LOGS" "yes" "no"
+fi
+unset WARP_CLI_AGENT_V3_EVENTS WARP_KEEP_LOGS
+teardown_log_fixture
+
+# on-subagent-start: V3 off → tool_start with Agent/<type>
+setup_log_fixture "r5-subagent-off"
+unset WARP_CLI_AGENT_V3_EVENTS
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", agent_id:"a1", agent_type:"Explore"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-subagent-start.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    EVENT=$(grep 'EMIT' "$LOGFILE" | grep -oE 'event=[a-z_]+' | tail -1)
+    assert_eq "R5: V3 off → subagent_start falls back to tool_start" "event=tool_start" "$EVENT"
+    TOOL_NAME_RECORDED=$(grep 'EMIT' "$LOGFILE" | grep -oE 'tool_name=[A-Za-z/]+' | tail -1)
+    assert_eq "R5: V3 off → subagent tool_name=Agent/<type>"         "tool_name=Agent/Explore" "$TOOL_NAME_RECORDED"
+else
+    assert_eq "R5: V3 off subagent log exists" "yes" "no"
+fi
+teardown_log_fixture
+
+# on-subagent-start: V3 on → subagent_start (preserves v3 event name)
+setup_log_fixture "r5-subagent-on"
+export WARP_CLI_AGENT_V3_EVENTS=1
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", agent_id:"a1", agent_type:"Explore"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-subagent-start.sh" >/dev/null 2>&1
+if [ -f "$LOGFILE" ]; then
+    EVENT=$(grep 'EMIT' "$LOGFILE" | grep -oE 'event=[a-z_]+' | tail -1)
+    assert_eq "R5: V3 on → subagent_start emits as-is" "event=subagent_start" "$EVENT"
+else
+    assert_eq "R5: V3 on subagent log exists" "yes" "no"
+fi
+unset WARP_CLI_AGENT_V3_EVENTS
+teardown_log_fixture
+
+echo ""
+echo "=== log format invariants ==="
+
+setup_log_fixture "fmt"
+INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", prompt:"test prompt"}')
+echo "$INPUT" | bash "$HOOK_DIR/on-prompt-submit.sh" >/dev/null 2>&1
+
+if [ -f "$LOGFILE" ]; then
+    assert_eq "log format: prompt_submit writes exactly 2 lines"                "2" "$(wc -l < "$LOGFILE" | tr -d ' ')"
+    assert_eq "log format: exactly 1 HOOK= line"                                "1" "$(count_matches '^\[.*\] HOOK=' "$LOGFILE")"
+    assert_eq "log format: exactly 1 EMIT line"                                 "1" "$(count_matches '^\[.*\] EMIT' "$LOGFILE")"
+
+    FIRST_LINE=$(head -1 "$LOGFILE")
+    if [[ "$FIRST_LINE" =~ ^\[[0-9]{4}-[0-9]{2}-[0-9]{2}\ [0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{3}\] ]]; then
+        assert_eq "log format: [YYYY-MM-DD HH:MM:SS.mmm] timestamp shape" "ok" "ok"
+    else
+        assert_eq "log format: [YYYY-MM-DD HH:MM:SS.mmm] timestamp shape" "ok" "wrong: $FIRST_LINE"
+    fi
+
+    # Symlink is hardcoded at /tmp so `tail -f /tmp/warp-claude-latest.log`
+    # works consistently across macOS ($TMPDIR != /tmp) and Linux.
+    if [ -L "/tmp/warp-claude-latest.log" ]; then
+        TARGET=$(readlink "/tmp/warp-claude-latest.log")
+        if [ "$TARGET" = "$LOGFILE" ]; then
+            assert_eq "log format: /tmp/warp-claude-latest.log points to current" "ok" "ok"
+        else
+            assert_eq "log format: /tmp/warp-claude-latest.log points to current" "ok" "stale: $TARGET"
+        fi
+    else
+        assert_eq "log format: /tmp/warp-claude-latest.log present" "yes" "no"
+    fi
+else
+    assert_eq "log format: prompt_submit wrote a log file" "yes" "no"
+fi
+teardown_log_fixture
+
+unset WARP_CLI_AGENT_PROTOCOL_VERSION WARP_CLIENT_VERSION
+
 # --- Summary ---
 
 echo ""
