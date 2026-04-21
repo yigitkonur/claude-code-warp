@@ -43,41 +43,43 @@ fi
 
 log_hook "SessionStart" "$INPUT"
 
-SOURCE=$(echo "$INPUT" | jq -r '.source // "startup"' 2>/dev/null)
-
-# On a fresh tab (source=startup) we emit NOTHING. This matches what the user
-# observes with Gemini CLI and Factory/Droid: those CLIs don't register any
-# Warp hook at all, so no `warp://cli-agent` OSC ever arrives, and Warp's
-# sidebar shows the pane with just the CLI label + cwd + branch — no state pill.
-#
-# Any session_start payload we emit (even the minimal Gemini-shape 7 fields)
-# causes Warp to attach a state label to the row. For `agent: "claude"` the
-# default label is "In progress" — worse than no label. Emitting a follow-up
-# `stop` forces it to "Done", which is also worse than no label since the turn
-# hasn't happened yet.
-#
-# By emitting nothing on startup, the sidebar row comes up clean via Warp's
-# process-detection path, and only gets a state pill when the user actually
-# submits a prompt (`prompt_submit` → "running"). Subsequent `stop` → "done".
-#
-# The plugin_version signal for Warp's outdated-plugin banner is re-attached
-# to on-prompt-submit.sh, so Warp still learns our version on first use.
-if [ "$SOURCE" = "startup" ]; then
-    exit 0
-fi
-
-# For resume / clear / compact: a returning session has genuine state to
-# surface (context restored, cwd may have changed). Emit session_start with
-# source + enrichment so Warp can refresh the sidebar label.
 PLUGIN_VERSION=$(jq -r '.version // "unknown"' "$SCRIPT_DIR/../.claude-plugin/plugin.json" 2>/dev/null)
+
+# SessionStart context lets Warp disambiguate fresh starts from
+# resumed / cleared / compacted sessions.
+SOURCE=$(echo "$INPUT" | jq -r '.source // "startup"' 2>/dev/null)
 MODEL=$(echo "$INPUT" | jq -r '.model // empty' 2>/dev/null)
 PERMISSION_MODE=$(echo "$INPUT" | jq -r '.permission_mode // empty' 2>/dev/null)
 AGENT_TYPE=$(echo "$INPUT" | jq -r '.agent_type // empty' 2>/dev/null)
 
-EXTRA_ARGS=(--arg plugin_version "$PLUGIN_VERSION" --arg source "$SOURCE")
-[ -n "$MODEL" ]           && EXTRA_ARGS+=(--arg model "$MODEL")
-[ -n "$PERMISSION_MODE" ] && EXTRA_ARGS+=(--arg permission_mode "$PERMISSION_MODE")
-[ -n "$AGENT_TYPE" ]      && EXTRA_ARGS+=(--arg agent_type "$AGENT_TYPE")
+# Build payload matching Gemini's Ready-state shape on a fresh tab:
+# {v, agent, event, session_id, cwd, project, plugin_version} — exactly 7 fields.
+# Omit source / model / permission_mode / agent_type on `source=startup` since
+# Warp reads those as "agent has active context" and anchors the sidebar in
+# In progress. Keep them on resume / clear / compact where context really is
+# returning.
+EXTRA_ARGS=(--arg plugin_version "$PLUGIN_VERSION")
+if [ -n "$SOURCE" ] && [ "$SOURCE" != "startup" ]; then
+    EXTRA_ARGS+=(--arg source "$SOURCE")
+    [ -n "$MODEL" ]           && EXTRA_ARGS+=(--arg model "$MODEL")
+    [ -n "$PERMISSION_MODE" ] && EXTRA_ARGS+=(--arg permission_mode "$PERMISSION_MODE")
+    [ -n "$AGENT_TYPE" ]      && EXTRA_ARGS+=(--arg agent_type "$AGENT_TYPE")
+fi
 
 BODY=$(build_payload "$INPUT" "session_start" "${EXTRA_ARGS[@]}")
 "$SCRIPT_DIR/warp-notify.sh" "warp://cli-agent" "$BODY"
+
+# Force the sidebar into "done" state by emitting a synthetic `stop` event
+# right after `session_start`. Without this, Warp keeps a freshly-registered
+# Claude Code session in its "running" default ("In progress" in the sidebar).
+#
+# The zero-emit approach we tried in v3.0.5 turned out to break sidebar
+# registration entirely — unlike Gemini / Factory-Droid (which Warp
+# auto-detects by binary name), Claude sessions need at least one
+# `warp://cli-agent` OSC event for the sidebar row to appear.
+#
+# `stop` carries no user-visible notification when `query` and `response`
+# are absent (build_payload strips empty-string args), so this doesn't
+# fire a "task completed" toast on every new tab.
+STOP_BODY=$(build_payload "$INPUT" "stop")
+"$SCRIPT_DIR/warp-notify.sh" "warp://cli-agent" "$STOP_BODY"

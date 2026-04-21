@@ -53,15 +53,9 @@ fi
 
 PERMISSION_MODE=$(echo "$INPUT" | jq -r '.permission_mode // empty' 2>/dev/null)
 
-# plugin_version is attached here (not at session_start, since we suppress
-# startup emissions entirely). Warp's outdated-plugin banner reads this on
-# the first prompt_submit of a session — same effective signal, later timing.
-PLUGIN_VERSION=$(jq -r '.version // "unknown"' "$SCRIPT_DIR/../.claude-plugin/plugin.json" 2>/dev/null)
-
 BODY=$(build_payload "$INPUT" "prompt_submit" \
     --arg query "$QUERY" \
     --arg session_title "$SESSION_TITLE" \
-    --arg permission_mode "$PERMISSION_MODE" \
-    --arg plugin_version "$PLUGIN_VERSION")
+    --arg permission_mode "$PERMISSION_MODE")
 
 "$SCRIPT_DIR/warp-notify.sh" "warp://cli-agent" "$BODY"

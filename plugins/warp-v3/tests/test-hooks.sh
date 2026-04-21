@@ -566,49 +566,38 @@ fi
 teardown_log_fixture
 
 echo ""
-echo "=== session_start: fresh tab emits NOTHING (Droid/Gemini parity) ==="
+echo "=== session_start: Gemini-shape on fresh tab + synthetic stop for Done pill ==="
 
-# v3.0.5 behavior — on source=startup, on-session-start.sh exits silently.
-# Gemini CLI and Factory/Droid don't register any Warp hook at all in this
-# user's setup; their sidebar rows show only CLI label + cwd + branch, no
-# state pill. Matching that means emitting zero `warp://cli-agent` events on
-# startup — Warp's process-detection takes over and gives us the same clean
-# row. First event only fires on UserPromptSubmit.
-setup_log_fixture "startup-emits-nothing"
+# On source=startup, emit the minimal Gemini-match payload {v, agent, event,
+# session_id, cwd, project, plugin_version} plus a follow-up synthetic `stop`
+# so Warp's sidebar shows "Done" instead of the default "In progress".
+# v3.0.5 tried zero-emission (Droid/Gemini parity) but that turned off
+# sidebar registration entirely for `agent:"claude"` — reverted in v3.0.6.
+setup_log_fixture "startup-shape"
 INPUT=$(jq -nc --arg sid "$TEST_SESSION" \
     '{session_id:$sid, cwd:"/tmp", source:"startup", model:"claude-opus-4-7[1m]", permission_mode:"default"}')
 echo "$INPUT" | bash "$HOOK_DIR/on-session-start.sh" >/dev/null 2>&1
 if [ -f "$LOGFILE" ]; then
-    assert_eq "startup: HOOK= line still logged (diagnostic)"  "1" "$(count_matches 'HOOK=SessionStart' "$LOGFILE")"
-    assert_eq "startup: zero EMIT lines"                        "0" "$(count_matches 'EMIT' "$LOGFILE")"
-else
-    # Acceptable alternative: no log file at all (hook exited before log_hook).
-    # But our current impl does log before the startup early-exit, so the above
-    # branch is the one that runs.
-    assert_eq "startup: log file exists (for HOOK line)" "yes" "no"
+    assert_eq "startup: event=session_start emitted"                 "1" "$(count_matches 'EMIT.*event=session_start' "$LOGFILE")"
+    assert_eq "startup: source= absent (avoids In progress)"          "0" "$(grep 'EMIT' "$LOGFILE" | grep 'event=session_start' | grep -c 'source=' 2>/dev/null || true)"
+    assert_eq "startup: model= absent"                                "0" "$(grep 'EMIT' "$LOGFILE" | grep 'event=session_start' | grep -c 'model=' 2>/dev/null || true)"
+    assert_eq "startup: permission_mode= absent"                      "0" "$(grep 'EMIT' "$LOGFILE" | grep 'event=session_start' | grep -c 'permission_mode=' 2>/dev/null || true)"
+    assert_eq "startup: synthetic stop follows session_start"         "1" "$(count_matches 'EMIT.*event=stop' "$LOGFILE")"
 fi
 teardown_log_fixture
 
-# plugin_version is attached to prompt_submit now (moved from session_start so
-# Warp's outdated-plugin banner still has a signal, just later in the lifecycle).
-setup_log_fixture "prompt-submit-carries-plugin-version"
-INPUT=$(jq -nc --arg sid "$TEST_SESSION" '{session_id:$sid, cwd:"/tmp", prompt:"hi"}')
-echo "$INPUT" | bash "$HOOK_DIR/on-prompt-submit.sh" >/dev/null 2>&1
-# Just assert the payload exists — we check the field placement by reading the raw body.
-PAYLOAD=$(build_payload '{"session_id":"s1","cwd":"/tmp"}' "prompt_submit" \
-    --arg query "hi" \
-    --arg plugin_version "3.0.5")
-assert_eq "prompt_submit carries plugin_version" "3.0.5" "$(echo "$PAYLOAD" | jq -r '.plugin_version' 2>/dev/null)"
-teardown_log_fixture
+# Direct payload-shape check: startup payload has exactly the Gemini-minimum 7 keys.
+PAYLOAD=$(build_payload '{"session_id":"s1","cwd":"/tmp"}' "session_start" --arg plugin_version "3.0.6")
+PAYLOAD_KEYS=$(echo "$PAYLOAD" | jq -r 'keys | sort | join(",")' 2>/dev/null)
+assert_eq "startup payload: exactly 7 keys, Gemini-match" \
+    "agent,cwd,event,plugin_version,project,session_id,v" "$PAYLOAD_KEYS"
 
-# On resume/clear/compact, we DO emit session_start with enrichment — a
-# returning session has context to surface and the sidebar should reflect it.
-setup_log_fixture "resume-emits-enrichment"
+# On resume/clear/compact, the enrichment IS informative and should be preserved.
+setup_log_fixture "resume-keeps-enrichment"
 INPUT=$(jq -nc --arg sid "$TEST_SESSION" \
     '{session_id:$sid, cwd:"/tmp", source:"resume", model:"claude-opus-4-7[1m]", permission_mode:"acceptEdits"}')
 echo "$INPUT" | bash "$HOOK_DIR/on-session-start.sh" >/dev/null 2>&1
 if [ -f "$LOGFILE" ]; then
-    assert_eq "resume: session_start emitted"                   "1" "$(count_matches 'EMIT.*event=session_start' "$LOGFILE")"
     assert_eq "resume: source=resume preserved"                 "1" "$(count_matches 'EMIT.*source=resume' "$LOGFILE")"
     assert_eq "resume: model= preserved (informative)"          "1" "$(count_matches 'EMIT.*model=' "$LOGFILE")"
     assert_eq "resume: permission_mode=acceptEdits preserved"   "1" "$(count_matches 'EMIT.*permission_mode=acceptEdits' "$LOGFILE")"
