@@ -1,18 +1,18 @@
 {
-  "name": "claude-code-warp",
-  "description": "Official Warp terminal integrations for Claude Code",
+  "name": "claude-code-warp-v3-testing",
+  "description": "Side-by-side v3 testing fork of warpdotdev/claude-code-warp. Install this alongside the official marketplace to test v3 hook lifecycle coverage without removing the upstream v2 plugin.",
   "owner": {
-    "name": "Warp",
-    "url": "https://warp.dev"
+    "name": "Yigit Konur",
+    "url": "https://github.com/yigitkonur"
   },
   "plugins": [
     {
-      "name": "warp",
-      "description": "Native Warp notifications with complete Claude Code hook lifecycle coverage",
-      "source": "./plugins/warp",
+      "name": "warp-v3",
+      "description": "v3 hook coverage for claude-code-warp. Runs side-by-side with warp@claude-code-warp — disable one to avoid duplicate notifications.",
+      "source": "./plugins/warp-v3",
       "version": "3.0.0",
       "category": "productivity",
-      "tags": ["notifications", "terminal", "warp"]
+      "tags": ["notifications", "terminal", "warp", "testing"]
     }
   ]
 }
