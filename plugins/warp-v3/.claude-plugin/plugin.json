@@ -1,7 +1,7 @@
 {
   "name": "warp-v3",
   "description": "Warp terminal integration (v3 testing fork) — complete hook lifecycle coverage. Install alongside or in place of warp@claude-code-warp.",
-  "version": "3.0.0",
+  "version": "3.0.5",
   "author": {
     "name": "Yigit Konur (testing fork)",
     "url": "https://github.com/yigitkonur/claude-code-warp"

@@ -10,7 +10,7 @@
       "name": "warp-v3",
       "description": "v3 hook coverage for claude-code-warp. Runs side-by-side with warp@claude-code-warp — disable one to avoid duplicate notifications.",
       "source": "./plugins/warp-v3",
-      "version": "3.0.0",
+      "version": "3.0.5",
       "category": "productivity",
       "tags": ["notifications", "terminal", "warp", "testing"]
     }
