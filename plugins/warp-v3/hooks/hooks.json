@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-session-start.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-session-start.sh\"",
             "timeout": 5
           }
         ]
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-session-end.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-session-end.sh\"",
             "timeout": 5
           }
         ]
@@ -29,7 +29,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-prompt-submit.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-prompt-submit.sh\"",
             "timeout": 5
           }
         ]
@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-permission-request.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-permission-request.sh\"",
             "timeout": 5
           }
         ]
@@ -51,7 +51,18 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-permission-denied.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-permission-denied.sh\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-pre-tool-use.sh\"",
             "timeout": 5
           }
         ]
@@ -59,11 +70,10 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "Bash|Edit|Write|MultiEdit|NotebookEdit|Agent",
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-post-tool-use.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-post-tool-use.sh\"",
             "timeout": 5
           }
         ]
@@ -74,7 +84,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-post-tool-use-failure.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-post-tool-use-failure.sh\"",
             "timeout": 5
           }
         ]
@@ -85,7 +95,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-subagent-start.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-subagent-start.sh\"",
             "timeout": 5
           }
         ]
@@ -96,9 +106,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-subagent-stop.sh",
-            "timeout": 5,
-            "async": true
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-subagent-stop.sh\"",
+            "timeout": 5
           }
         ]
       }
@@ -109,7 +118,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-notification.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-notification.sh\"",
             "timeout": 5
           }
         ]
@@ -120,9 +129,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-stop.sh",
-            "timeout": 5,
-            "async": true
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-stop.sh\"",
+            "timeout": 5
           }
         ]
       }
@@ -132,9 +140,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-stop-failure.sh",
-            "timeout": 5,
-            "async": true
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-stop-failure.sh\"",
+            "timeout": 5
           }
         ]
       }
@@ -144,7 +151,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-pre-compact.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-pre-compact.sh\"",
             "timeout": 5
           }
         ]
@@ -155,7 +162,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-post-compact.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-post-compact.sh\"",
             "timeout": 5
           }
         ]
@@ -166,7 +173,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-cwd-changed.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-cwd-changed.sh\"",
             "timeout": 5
           }
         ]
@@ -177,7 +184,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/scripts/on-elicitation.sh",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/on-elicitation.sh\"",
             "timeout": 5
           }
         ]

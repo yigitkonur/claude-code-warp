@@ -15,9 +15,11 @@ if ! should_use_structured; then
     exit 0
 fi
 
+source "$SCRIPT_DIR/warp-log.sh"
 source "$SCRIPT_DIR/build-payload.sh"
 
 INPUT=$(cat)
+log_hook "Notification" "$INPUT"
 
 NOTIF_TYPE=$(echo "$INPUT" | jq -r '.notification_type // "unknown"' 2>/dev/null)
 MSG=$(echo "$INPUT" | jq -r '.message // "Input needed"' 2>/dev/null)

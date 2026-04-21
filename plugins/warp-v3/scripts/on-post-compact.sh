@@ -3,6 +3,8 @@
 # Emits compact_end after context compaction completes. Lets the sidebar
 # restore normal session display after showing a compacting indicator.
 #
+# R5: `compact_end` is a v3-only event; suppressed by default.
+#
 # https://docs.anthropic.com/en/docs/claude-code/hooks#postcompact
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,9 +14,15 @@ if ! should_use_structured; then
     exit 0
 fi
 
+source "$SCRIPT_DIR/warp-log.sh"
 source "$SCRIPT_DIR/build-payload.sh"
 
 INPUT=$(cat)
+log_hook "PostCompact" "$INPUT"
+
+if ! should_emit_v3_events; then
+    exit 0
+fi
 
 TRIGGER=$(echo "$INPUT" | jq -r '.trigger // "unknown"' 2>/dev/null)
 

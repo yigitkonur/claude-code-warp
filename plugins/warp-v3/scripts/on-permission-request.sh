@@ -11,21 +11,29 @@ if ! should_use_structured; then
     exit 0
 fi
 
+source "$SCRIPT_DIR/warp-log.sh"
 source "$SCRIPT_DIR/build-payload.sh"
 
 INPUT=$(cat)
+log_hook "PermissionRequest" "$INPUT"
+
+# Drop a .blocked marker so the next PostToolUse emits tool_complete to clear
+# Warp's Blocked state. Without the marker, PostToolUse skips emission — this
+# prevents the 200+ GB Warp memory leak from firing tool_complete on every
+# Read/Glob/Grep/etc (warpdotdev/claude-code-warp#22).
+SESSION_ID=$(echo "$INPUT" | jq -r '.session_id // empty' 2>/dev/null)
+if [ -n "$SESSION_ID" ]; then
+    : > "${TMPDIR:-/tmp}/warp-claude-${SESSION_ID}.blocked" 2>/dev/null || true
+fi
 
 TOOL_NAME=$(echo "$INPUT" | jq -r '.tool_name // "unknown"' 2>/dev/null)
 TOOL_INPUT=$(echo "$INPUT" | jq -c '.tool_input // {}' 2>/dev/null)
 [ -z "$TOOL_INPUT" ] && TOOL_INPUT='{}'
 
-# Build a human-readable summary from the tool's most visible field.
-TOOL_PREVIEW=$(echo "$INPUT" | jq -r '(.tool_input | if .command then .command elif .file_path then .file_path elif .url then .url elif .query then .query elif .pattern then .pattern else (tostring | .[0:80]) end) // ""' 2>/dev/null)
+TOOL_PREVIEW_RAW=$(echo "$INPUT" | jq -r '(.tool_input | if .command then .command elif .file_path then .file_path elif .url then .url elif .query then .query elif .pattern then .pattern else (tostring | .[0:80]) end) // ""' 2>/dev/null)
+TOOL_PREVIEW=$(utf8_truncate "$TOOL_PREVIEW_RAW" 120)
 SUMMARY="Wants to run $TOOL_NAME"
 if [ -n "$TOOL_PREVIEW" ]; then
-    if [ ${#TOOL_PREVIEW} -gt 120 ]; then
-        TOOL_PREVIEW="${TOOL_PREVIEW:0:117}..."
-    fi
     SUMMARY="$SUMMARY: $TOOL_PREVIEW"
 fi
 

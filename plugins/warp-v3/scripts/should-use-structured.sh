@@ -42,3 +42,13 @@ should_use_structured() {
 
     return 0
 }
+
+# Whether this Warp build knows the v3-only event names
+# (session_end, permission_denied, tool_failed, subagent_{start,stop},
+# compact_{start,end}, cwd_changed). Opt-in via env so the fork doesn't
+# silently emit events that current stable Warp drops — leaving the sidebar
+# in a zombie state. Set WARP_CLI_AGENT_V3_EVENTS=1 once you've verified your
+# Warp build routes these event names.
+should_emit_v3_events() {
+    [ "${WARP_CLI_AGENT_V3_EVENTS:-0}" = "1" ]
+}

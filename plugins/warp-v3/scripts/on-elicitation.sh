@@ -14,17 +14,16 @@ if ! should_use_structured; then
     exit 0
 fi
 
+source "$SCRIPT_DIR/warp-log.sh"
 source "$SCRIPT_DIR/build-payload.sh"
 
 INPUT=$(cat)
+log_hook "Elicitation" "$INPUT"
 
 # Elicitation's matcher is the MCP server name; it also appears in tool_name.
 SERVER_NAME=$(echo "$INPUT" | jq -r '.server_name // .tool_name // "unknown"' 2>/dev/null)
-MESSAGE=$(echo "$INPUT" | jq -r '.message // .requestedSchema.description // empty' 2>/dev/null)
-
-if [ -n "$MESSAGE" ] && [ ${#MESSAGE} -gt 200 ]; then
-    MESSAGE="${MESSAGE:0:197}..."
-fi
+MESSAGE_RAW=$(echo "$INPUT" | jq -r '.message // .requestedSchema.description // empty' 2>/dev/null)
+MESSAGE=$(utf8_truncate "$MESSAGE_RAW" 200)
 
 BODY=$(build_payload "$INPUT" "question_asked" \
     --arg tool_name "$SERVER_NAME" \
